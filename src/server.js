@@ -21,7 +21,7 @@ const __dirname = path.resolve();
 // Middleware
 app.use(
   cors({
-    origin: "https://streamify-frontend-5zxr-smoky.vercel.app/",
+    origin: "https://streamify-frontend-5zxr-smoky.vercel.app",
     credentials: true,
   })
 );
