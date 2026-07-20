@@ -21,7 +21,7 @@ const __dirname = path.resolve();
 // Middleware
 app.use(
   cors({
-    origin: "http://localhost:5173",
+    origin: "https://streamify-frontend-5zxr-smoky.vercel.app",
     credentials: true,
   })
 );
