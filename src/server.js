@@ -37,13 +37,12 @@ app.use("/api/ai", translateRoutes);
 app.use("/api/challenges", challengeRoutes);
 app.use("/api/messages", messageRoutes); // NEW
 
-// Production build
-if (process.env.NODE_ENV === "production") {
-  app.use(express.static(path.join(__dirname, "../frontend/dist")));
-  app.get("*", (req, res) => {
-    res.sendFile(path.join(__dirname, "../frontend", "dist", "index.html"));
+app.get("/", (req, res) => {
+  res.json({
+    success: true,
+    message: "Streamify Backend Running",
   });
-}
+});
 
 // Start server with Socket.io
 server.listen(PORT, () => {
