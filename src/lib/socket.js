@@ -13,7 +13,7 @@ const io = new Server(server, {
   transports: ["websocket", "polling"],
 });
 
-// userId (string) → { socketId, online }
+// userId (string) → Set of socket IDs
 const activeUsers  = new Map();
 // roomId → Set<userId string>
 const activeRooms  = new Map();
@@ -33,13 +33,22 @@ io.on("connection", (socket) => {
   const uid = socket.userId;
   console.log(`[Socket] ${uid} connected: ${socket.id}`);
 
-  activeUsers.set(uid, { socketId: socket.id, online: true });
+  socket.join(`user:${uid}`);
+
+  if (!activeUsers.has(uid)) {
+    activeUsers.set(uid, new Set());
+  }
+  const userSockets = activeUsers.get(uid);
+  const wasOffline = userSockets.size === 0;
+  userSockets.add(socket.id);
 
   // ① Tell THIS user who is currently online
   socket.emit("users:online", Array.from(activeUsers.keys()));
 
-  // ② Tell EVERYONE ELSE this user just came online
-  socket.broadcast.emit("user:online", { userId: uid });
+  // ② Tell EVERYONE ELSE this user just came online (only if first connection)
+  if (wasOffline) {
+    socket.broadcast.emit("user:online", { userId: uid });
+  }
 
   // ── DM ────────────────────────────────────────────────
   socket.on("dm:join", ({ recipientId }) => {
@@ -65,8 +74,8 @@ io.on("connection", (socket) => {
 
       io.to(channelId).emit("dm:message:new", payload);
 
-      const recipientSocket = activeUsers.get(rid);
-      if (recipientSocket?.online) {
+      const recipientSockets = activeUsers.get(rid);
+      if (recipientSockets && recipientSockets.size > 0) {
         await Message.updateOne({ _id: message._id }, { isRead: true, readAt: new Date() });
         io.to(channelId).emit("dm:message:read", { messageId: message._id });
       }
@@ -180,9 +189,10 @@ io.on("connection", (socket) => {
 
   socket.on("call:initiate", async ({ recipientId, callId, initiatorName }) => {
     const rid             = String(recipientId);
-    const recipientSocket = activeUsers.get(rid);
+    const recipientSockets = activeUsers.get(rid);
+    const isOnline        = recipientSockets && recipientSockets.size > 0;
 
-    if (!recipientSocket?.online) {
+    if (!isOnline) {
       socket.emit("call:error", { message: "Recipient is offline" });
       return;
     }
@@ -201,7 +211,7 @@ io.on("connection", (socket) => {
     callSessions.set(callId, { initiator: uid, recipient: rid, status: "ringing" });
     console.log(`[Call] ${uid} → ${rid} callId=${callId}`);
 
-    io.to(recipientSocket.socketId).emit("call:incoming", {
+    io.to(`user:${rid}`).emit("call:incoming", {
       callId,
       initiatorId:   uid,
       initiatorName: callerName,
@@ -212,11 +222,8 @@ io.on("connection", (socket) => {
     const session = callSessions.get(callId);
     if (!session) return;
     session.status = "active";
-    const initiatorSocket = activeUsers.get(session.initiator);
     console.log(`[Call] Accepted callId=${callId}, notifying initiator ${session.initiator}`);
-    if (initiatorSocket) {
-      io.to(initiatorSocket.socketId).emit("call:accepted", { callId });
-    }
+    io.to(`user:${session.initiator}`).emit("call:accepted", { callId });
   });
 
   /**
@@ -227,61 +234,53 @@ io.on("connection", (socket) => {
    * offer arrives before the recipient's PC exists.
    */
   socket.on("call:recipient:ready", ({ callId, initiatorId }) => {
-    const initiatorSocket = activeUsers.get(String(initiatorId));
     console.log(`[Call] Recipient ready for callId=${callId}, notifying initiator ${initiatorId}`);
-    if (initiatorSocket) {
-      io.to(initiatorSocket.socketId).emit("call:recipient:ready", { callId });
-    }
+    io.to(`user:${initiatorId}`).emit("call:recipient:ready", { callId });
   });
 
   socket.on("call:reject", ({ callId }) => {
     const session = callSessions.get(callId);
     if (session) {
-      const initiatorSocket = activeUsers.get(session.initiator);
-      if (initiatorSocket) io.to(initiatorSocket.socketId).emit("call:rejected", { callId });
+      io.to(`user:${session.initiator}`).emit("call:rejected", { callId });
     }
     callSessions.delete(callId);
   });
 
   socket.on("call:offer", ({ callId, offer, recipientId }) => {
-    const recipientSocket = activeUsers.get(String(recipientId));
-    if (recipientSocket) {
-      io.to(recipientSocket.socketId).emit("call:offer:received", {
-        callId, offer, senderId: uid,
-      });
-    }
+    io.to(`user:${recipientId}`).emit("call:offer:received", {
+      callId, offer, senderId: uid,
+    });
   });
 
   socket.on("call:answer", ({ callId, answer, recipientId }) => {
-    const recipientSocket = activeUsers.get(String(recipientId));
-    if (recipientSocket) {
-      io.to(recipientSocket.socketId).emit("call:answer:received", {
-        callId, answer, senderId: uid,
-      });
-    }
+    io.to(`user:${recipientId}`).emit("call:answer:received", {
+      callId, answer, senderId: uid,
+    });
   });
 
   socket.on("call:ice-candidate", ({ callId, candidate, recipientId }) => {
-    const recipientSocket = activeUsers.get(String(recipientId));
-    if (recipientSocket) {
-      io.to(recipientSocket.socketId).emit("call:ice-candidate:received", {
-        callId, candidate, senderId: uid,
-      });
-    }
+    io.to(`user:${recipientId}`).emit("call:ice-candidate:received", {
+      callId, candidate, senderId: uid,
+    });
   });
 
   socket.on("call:end", ({ callId, recipientId }) => {
-    const recipientSocket = activeUsers.get(String(recipientId));
-    if (recipientSocket) io.to(recipientSocket.socketId).emit("call:ended", { callId });
+    io.to(`user:${recipientId}`).emit("call:ended", { callId });
     callSessions.delete(callId);
     console.log(`[Call] Ended callId=${callId}`);
   });
 
   // ── Disconnect ────────────────────────────────────────
   socket.on("disconnect", () => {
-    console.log(`[Socket] ${uid} disconnected`);
-    activeUsers.delete(uid);
-    io.emit("user:offline", { userId: uid });
+    console.log(`[Socket] ${uid} disconnected: ${socket.id}`);
+    const userSockets = activeUsers.get(uid);
+    if (userSockets) {
+      userSockets.delete(socket.id);
+      if (userSockets.size === 0) {
+        activeUsers.delete(uid);
+        io.emit("user:offline", { userId: uid });
+      }
+    }
     activeRooms.forEach((members) => members.delete(uid));
   });
 
